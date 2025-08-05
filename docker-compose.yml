@@ -1,0 +1,93 @@
+version: '3.8'
+
+services:
+  postgres_airflow:
+    image: postgres:13
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow_password
+      POSTGRES_DB: airflow_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_airflow_data:/var/lib/postgresql/data
+
+  postgres_mlflow:
+    image: postgres:13
+    environment:
+      POSTGRES_USER: mlflow_user
+      POSTGRES_PASSWORD: mlflow_password
+      POSTGRES_DB: mlflow_db
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_mlflow_data:/var/lib/postgresql/data
+
+  minio:
+    build:
+      context: .
+      dockerfile: ./minio/Dockerfile
+    ports:
+      - "9001:9001" # Console
+      - "9000:9000"
+    volumes:
+      - minio_data:/data
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+      MINIO_BUCKETS: ${MINIO_BUCKETS}
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+    restart: unless-stopped
+
+  airflow-webserver:
+    build:
+      context: .
+      dockerfile: ./airflow/Dockerfile
+    restart: always
+    depends_on:
+      - postgres_airflow
+    environment:
+      - AIRFLOW__CORE__EXECUTOR=LocalExecutor
+      - AIRFLOW__CORE__SQL_ALCHEMY_CONN=postgresql+psycopg2://airflow:airflow_password@postgres_airflow/airflow_db
+      - AIRFLOW__WEBSERVER__WORKER_TIMEOUT=300
+    ports:
+      - "8080:8080"
+    command: >
+      bash -c "airflow db init && airflow users create -u admin -p admin -f Admin -l User -r Admin --email admin@example.com && airflow scheduler & airflow webserver"
+
+  mlflow-server:
+    build: ./mlflow
+    restart: always
+    environment:
+      - MLFLOW_TRACKING_URI=postgresql://mlflow_user:mlflow_password@postgres_mlflow/mlflow_db
+      - MLFLOW_S3_ENDPOINT_URL=${MLFLOW_S3_ENDPOINT_URL}
+      - AWS_ACCESS_KEY_ID=${MINIO_ROOT_USER}
+      - AWS_SECRET_ACCESS_KEY=${MINIO_ROOT_PASSWORD}
+    ports:
+      - "5000:5000"
+    command: >
+      sh -c "pip install mlflow[sqlalchemy,s3] && mlflow server --backend-store-uri postgresql://mlflow_user:mlflow_password@postgres_mlflow/mlflow_db --default-artifact-root s3://mlflow/ --host 0.0.0.0"
+    depends_on:
+      - minio
+
+  api:
+    build: ./api
+    ports:
+      - "8000:8000"
+    environment:
+      - MLFLOW_TRACKING_URI=http://mlflow-server:5000
+      - MLFLOW_S3_ENDPOINT_URL=${MLFLOW_S3_ENDPOINT_URL}
+      - AWS_ACCESS_KEY_ID=${MINIO_ROOT_USER}
+      - AWS_SECRET_ACCESS_KEY=${MINIO_ROOT_PASSWORD}
+    depends_on:
+      - mlflow-server
+      - minio
+
+volumes:
+  postgres_airflow_data:
+  postgres_mlflow_data:
+  minio_data:
